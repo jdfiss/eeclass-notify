@@ -1,0 +1,4 @@
+playwright==1.56.0
+requests>=2.31
+pypdf>=5
+python-pptx>=1.0

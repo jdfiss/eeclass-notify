@@ -1,0 +1,87 @@
+name: eeclass notify
+
+on:
+  schedule:
+    # 台灣時間 07:05～00:05 每小時一次（cron 用 UTC：23 點和 0～16 點），有新東西才傳；
+    # 每天 7 點後第一次執行傳完整早報。GitHub 排程常會晚幾分鐘到幾十分鐘
+    - cron: "5 0-16,23 * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "傳完整早報（今日重點、期限）"
+        type: boolean
+        default: false
+      resend_all:
+        description: "把目前所有公告、教材重傳一次（測試排版用）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # 把 state/seen.json commit 回 repo
+  models: read      # 沒設定 Gemini 金鑰時改用 GitHub Models 寫摘要
+
+concurrency:
+  group: eeclass-notify
+
+jobs:
+  notify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # 公開 repo 的 Actions log、artifact、seen.json 任何人都看得到，會洩漏課程資料，所以預設不跑
+      - name: Refuse to run in a public repo
+        if: ${{ vars.ALLOW_PUBLIC != '1' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          private=$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)
+          if [ "$private" != "true" ]; then
+            echo "::error::這個 repo 是 public。請到 Settings → General → Danger Zone 改成 Private 再執行（原因見 README「安全性」）。"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Check eeclass and send Telegram
+        env:
+          EECLASS_ACCOUNT: ${{ secrets.EECLASS_ACCOUNT }}
+          EECLASS_PASSWORD: ${{ secrets.EECLASS_PASSWORD }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EECLASS_BASE: ${{ vars.EECLASS_BASE }}
+          DUE_DAYS: ${{ vars.DUE_DAYS }}
+          AI_MODEL: ${{ vars.AI_MODEL }}
+          DEBUG: ${{ vars.DEBUG }}
+          FULL: ${{ inputs.full && '1' || '' }}
+          RESEND_ALL: ${{ inputs.resend_all && '1' || '' }}
+        run: python eeclass_notify.py
+
+      - name: Save seen items
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          [ -f state/seen.json ] || exit 0   # 夜間時段直接結束時還沒有紀錄檔
+          git add state/seen.json
+          git diff --cached --quiet || git commit -m "Update seen eeclass items [skip ci]"
+          git push
+
+      - name: Upload screenshots
+        if: ${{ failure() && vars.DEBUG == '1' }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: debug
+          path: debug/
+          retention-days: 3
+          if-no-files-found: ignore
